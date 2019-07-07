@@ -17,6 +17,7 @@
 #define TIMING_SZ 128
 #define WRITE_SZ 0x80
 
+#pragma pack(1)
 
 #define READ_CMD 0x52
 #define ERASE_CMD 0xf1
@@ -42,6 +43,9 @@ int main(){
     int SPI_SETUP;
     int cleared_status = 0;
     char status;
+
+    char first_page[38];
+
     char opening[6] = {0x00, 0x00, 0xFF, 0xFF, 0x00, 0x00};
     cmd_buffer = (unsigned char *) malloc(sizeof(unsigned char)*0x600);
     memcpy(cmd_buffer, opening, 6); 
@@ -65,7 +69,15 @@ int main(){
             cleared_status = 1;
         }
     }
-    
+
+    printf("setting interupt ... ");
+    set_interrupt()?:goto set_interrupt;
+
+    printf("unlock command");
+    read_page(0x7fec9, 29)?:goto err_read_page;
+
+    printf("getting first page");
+    first_page = read_page(0, 38)?: goto err_read_page;    
 
     
     cleanup();
