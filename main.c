@@ -3,6 +3,8 @@
 #include <string.h>
 #include <stdlib.h>
 #include <unistd.h>
+#include <stdint.h>
+#include <byteswap.h>
 
 #include <wiringPi.h>
 #include <wiringPiSPI.h>
@@ -23,13 +25,26 @@
 #define ERASE_CMD 0xf1
 #define WAKE_CMD 0x87
 
+typedef struct header{
+    char serial[12];
+    uint64_t time;
+    int bias;
+    int lang;
+    int unk1;
+    short deviceId;
+    short sizeMb;
+    short encoding;
+}HEADER;
+
 void addr_to_bytes(int, unsigned char *);
 int bytes_to_addr(unsigned char *);
 void fill_arr(unsigned char *, unsigned char, int);
+void print_mem(void *, int);
+void bswap_header(HEADER *);
 void cleanup(void);
 
-int read_page(int, int);
-int write_page(int, unsigned char *);
+int read_page(unsigned int, int);
+int write_page(unsigned int, unsigned char *, int);
 int erase_sector(int);
 int get_status();
 int clear_status();
@@ -44,24 +59,24 @@ int main(){
     int cleared_status = 0;
     char status;
 
-    char first_page[38];
+    HEADER * hdr;
 
     char opening[6] = {0x00, 0x00, 0xFF, 0xFF, 0x00, 0x00};
     cmd_buffer = (unsigned char *) malloc(sizeof(unsigned char)*0x600);
     memcpy(cmd_buffer, opening, 6); 
 
-    wiringPiSetupPhys()?: goto err_setup;
-    wiringPiSPISetup(CHNL, CLK)?: goto err_spi_setup;
+    wiringPiSetupPhys();
+    if (!wiringPiSPISetup(CHNL, CLK)) goto err_spi_setup;
     
     pinMode(INT, OUTPUT);
     digitalWrite(INT, 0);
 
-    wiringPiSPIDataRW(CHNL, cmd_buffer, 6)?:goto err_open;
+    if (!wiringPiSPIDataRW(CHNL, cmd_buffer, 6)) goto err_open;
     while(!cleared_status){
         printf("clearing status ...\n");
-        clear_status()?:goto err_clear_status;
+        if (!clear_status()) goto err_clear_status;
 
-        get_status()?:goto err_get_status;
+        if (!get_status()) goto err_get_status;
         status = cmd_buffer[2];
         printf("getting status: %#02x\n", status);
 
@@ -70,21 +85,33 @@ int main(){
         }
     }
 
-    printf("setting interupt ... ");
-    set_interrupt()?:goto set_interrupt;
+    printf("setting interupt ...\n");
+    if(!set_interrupt()) goto err_set_interrupt;
 
-    printf("unlock command");
-    read_page(0x7fec9, 29)?:goto err_read_page;
+    printf("unlock command\n");
+    if (!read_page(0x7fec9, 29)) goto err_read_page;
 
-    printf("getting first page");
-    first_page = read_page(0, 38)?: goto err_read_page;    
+    printf("getting first page\n");
+    if(!read_page(0, 38)) goto err_read_page;    
+    hdr = (HEADER *) (cmd_buffer+TIMING_SZ+5);
+    bswap_header(hdr);
 
-    
-    cleanup();
+    print_mem(hdr, 38);
+    printf("lang %d\nencoding %d\nsizeMb %d\nbias %d\ndeviceID %d\ntime %lld\nserial ",
+            hdr->lang, 
+            hdr->encoding, 
+            hdr->sizeMb,
+            hdr->deviceId,
+            hdr->deviceId,
+            hdr->time);
+    print_mem(hdr->serial, 12);
+
+
+    free(cmd_buffer);
     return 0;
 
     error:
-    cleanup();
+    free(cmd_buffer);
     return -1;
 
     err_setup:
@@ -119,7 +146,7 @@ int main(){
     perror("Failed to write page");
     goto error;
 
-    err_set_int:
+    err_set_interrupt:
     perror("Failed to set interrupt");
     goto error;
 
@@ -151,6 +178,17 @@ int bytes_to_addr( unsigned char * addr_bytes ){
     return result;
 }
 
+void bswap_header(HEADER * hdr){
+    hdr->time = bswap_64(hdr->time);
+    hdr->bias = bswap_32(hdr->bias);
+    hdr->lang = bswap_32(hdr->lang);
+    hdr->unk1 = bswap_32(hdr->unk1);
+    hdr->deviceId = bswap_16(hdr->deviceId);
+    hdr->sizeMb = bswap_16(hdr->sizeMb);
+    hdr->encoding = bswap_16(hdr->encoding);
+}
+
+
 void fill_arr(unsigned char * arr, unsigned char byte, int len){
     int i;
 
@@ -158,15 +196,22 @@ void fill_arr(unsigned char * arr, unsigned char byte, int len){
         arr[i] = byte;
     }
 }
-
-int read_page(int addr, int amt){
+void print_mem(void * mem, int len){
+    int i;
+    unsigned char * memc = (unsigned char *) mem;
+    for (i=0; i<len; i++){
+        printf("%02x", memc[i]);
+    }
+    printf("\n");
+}
+int read_page(unsigned int addr, int amt){
     if (amt > READ_SZ){
         return -2;
     } 
     unsigned char bytes[4]; 
-    *cmd_buffer = READ_CMD;
+    cmd_buffer[0] = READ_CMD;
     addr_to_bytes(addr, bytes);
-    memcpy(cmd_buffer++, bytes, 4);
+    memcpy(cmd_buffer+1, bytes, 4);
 
     fill_arr((cmd_buffer+5), 0xff, TIMING_SZ+amt);
     return wiringPiSPIDataRW( CHNL, cmd_buffer, 5+TIMING_SZ+amt);
@@ -201,14 +246,14 @@ int clear_status(){
 int wake_up(){
     int success;
     
-    *cmd_buffer = WAKE_CMD;
+    cmd_buffer[0] = WAKE_CMD;
     success = wiringPiSPIDataRW(CHNL, cmd_buffer, 1);
 
     usleep(3500);
     return success;
 }
 
-int write_page(int addr, unsigned char * data, int len){
+int write_page(unsigned int addr, unsigned char * data, int len){
     int ready = 0;
     
     int status_success;
@@ -259,7 +304,7 @@ int write_page(int addr, unsigned char * data, int len){
 }
 
 int write_buffer(){
-    *cmd_buffer = 0x82;
+    cmd_buffer[0] = 0x82;
     return wiringPiSPIDataRW(CHNL, cmd_buffer, 1);
 }
 
