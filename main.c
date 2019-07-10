@@ -25,6 +25,13 @@
 #define ERASE_CMD 0xf1
 #define WAKE_CMD 0x87
 
+#define READ_PAD 133
+
+
+#define READ 1
+#define WRITE 2
+
+
 typedef struct header{
     char serial[12];
     uint64_t time;
@@ -54,10 +61,34 @@ int write_buffer();
 
 unsigned char * cmd_buffer;
 
-int main(){
+int main(int argc, char * argv[]){
     int SPI_SETUP;
     int cleared_status = 0;
+    int total_size;
     char status;
+    int op = 0;
+
+    if(argc>1){
+        if (!strcmp(argv[1], "-h")||!strcmp(argv[1], "--help")){
+            printf("usage: gcmcr [-h] [-r DUMPFILE] [-w OLDFILE NEWFILE]\n\nOptional Arguments:\n   -h, --help                    Show this messgage\n   -r, --read DUMPFILE           Dump memorycard to file DUMPFILE\n   -w, --write OLDFILE NEWFILE   Write the diffs between OLDFILE and NEWFILE to the memorycard\n");
+            return 0;
+        }else if (!strcmp(argv[1], "-r")||!strcmp(argv[1], "--read")){
+            op = READ;
+            if (argc!= 3){
+                printf("Incorrect Number of Arguments");
+                return -1;
+            }
+        }else if (!strcmp(argv[1], "-r")||!strcmp(argv[1], "--write")){
+            op = WRITE;
+            if(argc != 4){
+                printf("Incorrect Number of Arguments");
+                return -1;
+            }
+        }else{
+            printf("Unrecognized Argument: %s", argv[1]);
+            return -1;
+        }
+    }
 
     HEADER * hdr;
 
@@ -93,11 +124,11 @@ int main(){
 
     printf("getting first page\n");
     if(!read_page(0, 38)) goto err_read_page;    
-    hdr = (HEADER *) (cmd_buffer+TIMING_SZ+5);
+    hdr = (HEADER *) (cmd_buffer+READ_PAD);
     bswap_header(hdr);
 
     print_mem(hdr, 38);
-    printf("lang %d\nencoding %d\nsizeMb %d\nbias %d\ndeviceID %d\ntime %lld\nserial ",
+    printf("lang:      %d\nencoding:  %d\nsizeMb:    %d\nbias:      %d\ndeviceID:  %d\ntime:      %lld\nserial:    ",
             hdr->lang, 
             hdr->encoding, 
             hdr->sizeMb,
@@ -105,7 +136,48 @@ int main(){
             hdr->deviceId,
             hdr->time);
     print_mem(hdr->serial, 12);
+    
+    if (hdr->sizeMb > 128){
+        printf("ERROR: Maximum size is 128 MB");
+        goto error;
+    }
+    
 
+
+    total_size = hdr->sizeMb * 0x10 * BLOCK_SZ;
+    
+    if (op == READ){
+        FILE * dump_file = fopen(argv[2],"wb");
+        if (dump_file == NULL) {
+            perror("Error Opening dump file");
+            goto error;
+        }
+        unsigned char * data = (unsigned char *) malloc(total_size);
+        
+        unsigned char * data_ptr = data;
+
+        int num_reads = total_size/READ_SZ;
+        if (num_reads * READ_SZ < total_size) num_reads++;
+        
+        int i;
+        int start_addr;
+        int read_amt;
+        for (i = 0; i<num_reads;i++){
+            start_addr = i * READ_SZ;
+            if (start_addr + READ_SZ > total_size){
+                read_amt = (total_size - start_addr) % READ_SZ;
+            }else{
+                read_amt = READ_SZ;
+            }
+
+            read_page(start_addr, read_amt);
+            memcpy(data_ptr, cmd_buffer+READ_PAD, read_amt);
+            data_ptr += read_amt;
+        }
+        fwrite(data, 1, total_size, dump_file);
+        fclose(dump_file);
+        free(data);
+    }
 
     free(cmd_buffer);
     return 0;
