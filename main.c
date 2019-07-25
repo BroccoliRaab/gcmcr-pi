@@ -138,7 +138,7 @@ int main(int argc, char * argv[]){
     print_mem(hdr->serial, 12);
     
     if (hdr->sizeMb > 128){
-        printf("ERROR: Maximum size is 128 MB");
+        printf("ERROR: Maximum size is 128 Mb");
         goto error;
     }
     
@@ -170,7 +170,11 @@ int main(int argc, char * argv[]){
                 read_amt = READ_SZ;
             }
 
-            read_page(start_addr, read_amt);
+            if(!read_page(start_addr, read_amt)){
+                fclose(dump_file);
+		free(data);
+		goto err_read_page;
+	    }
             memcpy(data_ptr, cmd_buffer+READ_PAD, read_amt);
             data_ptr += read_amt;
         }
