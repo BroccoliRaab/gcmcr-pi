@@ -5,11 +5,12 @@
 #include <unistd.h>
 #include <stdint.h>
 #include <byteswap.h>
+#include <sys/stat.h>
 
 #include <wiringPi.h>
 #include <wiringPiSPI.h>
 
-#define CLK 12000000
+#define CLK 12000000 //12
 #define CHNL 0
 #define INT 7
 
@@ -69,23 +70,23 @@ int main(int argc, char * argv[]){
     int op = 0;
 
     if(argc>1){
-        if (!strcmp(argv[1], "-h")||!strcmp(argv[1], "--help")){
+        if (strcmp(argv[1], "-h") == 0 ||strcmp(argv[1], "--help") == 0 ){
             printf("usage: gcmcr [-h] [-r DUMPFILE] [-w OLDFILE NEWFILE]\n\nOptional Arguments:\n   -h, --help                    Show this messgage\n   -r, --read DUMPFILE           Dump memorycard to file DUMPFILE\n   -w, --write OLDFILE NEWFILE   Write the diffs between OLDFILE and NEWFILE to the memorycard\n");
             return 0;
-        }else if (!strcmp(argv[1], "-r")||!strcmp(argv[1], "--read")){
+        }else if ((strcmp(argv[1], "-r") == 0) ||(strcmp(argv[1], "--read") == 0)){
             op = READ;
             if (argc!= 3){
                 printf("Incorrect Number of Arguments");
                 return -1;
             }
-        }else if (!strcmp(argv[1], "-r")||!strcmp(argv[1], "--write")){
+        }else if ((strcmp(argv[1], "-w") == 0)|| (strcmp(argv[1], "--write") == 0)){
             op = WRITE;
             if(argc != 4){
-                printf("Incorrect Number of Arguments");
+                printf("Incorrect Number of Arguments\n");
                 return -1;
             }
         }else{
-            printf("Unrecognized Argument: %s", argv[1]);
+            printf("Unrecognized Argument: %s\n", argv[1]);
             return -1;
         }
     }
@@ -138,7 +139,7 @@ int main(int argc, char * argv[]){
     print_mem(hdr->serial, 12);
     
     if (hdr->sizeMb > 128){
-        printf("ERROR: Maximum size is 128 Mb");
+        printf("ERROR: Maximum size is 128 Mb\n");
         goto error;
     }
     
@@ -149,7 +150,7 @@ int main(int argc, char * argv[]){
     if (op == READ){
         FILE * dump_file = fopen(argv[2],"wb");
         if (dump_file == NULL) {
-            perror("Error Opening dump file");
+            perror("Error Opening dump file\n");
             goto error;
         }
         unsigned char * data = (unsigned char *) malloc(total_size);
@@ -181,6 +182,83 @@ int main(int argc, char * argv[]){
         fwrite(data, 1, total_size, dump_file);
         fclose(dump_file);
         free(data);
+    } else if (op == WRITE){
+        char * og_name = argv[2];
+        char * new_name = argv[3];
+
+        FILE * og_file = fopen(og_name, "rb");
+        FILE * new_file = fopen(new_name, "rb");
+        
+        if (og_file == NULL || new_file == NULL){
+            perror("Failed to open file\n");
+            goto error;
+        }
+
+        struct stat og_stat;
+        struct stat new_stat;
+        fstat(fileno(og_file), &og_stat);
+        fstat(fileno(new_file), &new_stat);
+
+        if(og_stat.st_size != new_stat.st_size || new_stat.st_size != total_size){
+            printf("Image size mismatch");
+            putchar('\n'); 
+            fclose(new_file);
+            fclose(og_file);
+            
+            goto error;
+        }
+
+        char * og_data = (char *) malloc(0x1000000);
+        char * new_data = (char *) malloc(0x1000000);
+
+        fread(og_data, sizeof(char), 0x1000000, og_file);
+        fread(new_data, sizeof(char), 0x1000000, new_file);
+
+        int diff_count =0;
+        int i, j;
+        int pos, slice_pos;
+        unsigned char * og_sector; 
+        unsigned char * new_sector;
+        unsigned char * new_slice;
+        for (i =0; i<(total_size/BLOCK_SZ); i++){
+            pos = i*BLOCK_SZ;
+
+            og_sector = og_data + pos;
+            new_sector = new_data + pos;
+            
+            printf("Writing block %d of %d", i+1, total_size/BLOCK_SZ);
+            putchar('\n');
+            if (memcmp(og_sector, new_sector, BLOCK_SZ) != 0){
+                diff_count++;
+                printf("Erasing sector at %#04x", pos);
+                putchar('\n');
+
+                for (j = 0; j<(BLOCK_SZ/WRITE_SZ); j++){
+                    slice_pos = pos + (j* WRITE_SZ);
+                    
+                    printf("Writing Slice at %#08x", slice_pos);
+                    putchar('\n');
+                    new_slice = new_sector + (j * WRITE_SZ);
+                    if (write_page(slice_pos, new_slice, WRITE_SZ) == -5){
+                        goto temp;
+                    }
+                }
+            }
+            usleep(4000);
+            digitalWrite(INT, 0);
+            get_status();
+            clear_status();
+            digitalWrite(INT, 1);
+            usleep(14000);
+
+        }
+        printf("Updated %d blocks", diff_count);
+        putchar('\n');
+        temp:
+        free(new_data);
+        free(og_data);
+        fclose(new_file);
+        fclose(og_file);
     }
 
     free(cmd_buffer);
@@ -334,12 +412,13 @@ int write_page(unsigned int addr, unsigned char * data, int len){
     
     int status_success;
     int clear_success;
+    int cleared = 0 ;
 
-    int status;
+    unsigned char status;
     int success;
 
     if (len> WRITE_SZ){
-        printf("Max write size is %#20x", WRITE_SZ);
+        printf("Max write size is %#20x\n", WRITE_SZ);
         return -2;
     }
     char addr_bytes[4];
@@ -351,17 +430,39 @@ int write_page(unsigned int addr, unsigned char * data, int len){
     if (!status_success){
         return status_success;
     }
+    if (cmd_buffer[2] & 1){
+        ready = 1;
+    }
     
-    status = cmd_buffer[2];
+    int count = 0;
     while (!ready){
-        status = cmd_buffer[2];
-        if ((status & 1) && !(status & 0x80)){
+
+        status_success = get_status();
+        if (!status_success){
+            return status_success;
+        }
+    
+        status = cmd_buffer[2] & 0x81;
+        if (status == 1){
             ready = 1;
         }else{
-            printf("Waiting for card ready ..");
+            printf("Waiting for card ready .. (status: %#02x)\n", status);
+//            count++;
+//            if (count == 10){
+//                return -5;
+//            }
         }
+        cleared = 1;
+        clear_status();
+        if (!clear_success){
+            return clear_success;
+        }
+    
     }
-    clear_success = clear_status();
+    if (!cleared){
+        clear_success = clear_status();
+    }
+
     if (!clear_success){
         return clear_success;
     }
